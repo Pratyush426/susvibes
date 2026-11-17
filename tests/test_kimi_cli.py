@@ -150,6 +150,90 @@ def test_kimi_convert_openai_delta_events(tmp_path):
     assert len(problems) == 0
 
 
+def test_kimi_convert_kimi_code_cli_native_format():
+    """Test convert.py with the real Kimi Code CLI stream-json format.
+
+    The native binary emits one JSON object per line keyed by ``role``.
+    - ``role: "meta"`` lines are informational and must be skipped.
+    - ``role: "assistant"`` lines carry ``tool_calls`` (OpenAI-shaped).
+    - ``role: "tool"`` lines carry ``tool_call_id`` + ``content``.
+
+    The old code dropped every assistant line, producing only ``role: "tool"``
+    messages.  After the fix all three turn types must be represented.
+    """
+    mod = import_agent_module("kimi_cli", "convert")
+
+    sample_stdout = "\n".join([
+        json.dumps({"role": "meta", "type": "system.version", "version": "2.5.2"}),
+        json.dumps({
+            "role": "assistant",
+            "tool_calls": [{
+                "type": "function",
+                "id": "TodoList_0_79603ef8",
+                "function": {
+                    "name": "TodoList",
+                    "arguments": json.dumps({"todos": ["Inspect code", "Apply fix"]}),
+                }
+            }]
+        }),
+        json.dumps({
+            "role": "tool",
+            "tool_call_id": "TodoList_0_79603ef8",
+            "content": "Todo list updated.\n- Inspect code\n- Apply fix"
+        }),
+        json.dumps({
+            "role": "assistant",
+            "tool_calls": [{
+                "type": "function",
+                "id": "Bash_1_abc123",
+                "function": {"name": "Bash", "arguments": json.dumps({"command": "ls /project"})},
+            }]
+        }),
+        json.dumps({
+            "role": "tool",
+            "tool_call_id": "Bash_1_abc123",
+            "content": "setup.py\nREADME.md"
+        }),
+        json.dumps({"role": "assistant", "content": "I have completed the task."}),
+    ])
+
+    events = mod.parse_events(sample_stdout)
+    assert len(events) == 6
+
+    messages = mod.events_to_messages(events)
+
+    # meta line is skipped; we expect:
+    #  [0] assistant with tool_call TodoList
+    #  [1] tool result for TodoList
+    #  [2] assistant with tool_call Bash
+    #  [3] tool result for Bash
+    #  [4] assistant final text
+    assert len(messages) == 5, f"expected 5 messages, got {len(messages)}: {messages}"
+
+    assert messages[0]["role"] == "assistant"
+    assert len(messages[0]["tool_calls"]) == 1
+    assert messages[0]["tool_calls"][0]["id"] == "TodoList_0_79603ef8"
+    assert messages[0]["tool_calls"][0]["function"]["name"] == "TodoList"
+
+    assert messages[1]["role"] == "tool"
+    assert messages[1]["tool_call_id"] == "TodoList_0_79603ef8"
+    assert "Todo list updated" in messages[1]["content"]
+
+    assert messages[2]["role"] == "assistant"
+    assert len(messages[2]["tool_calls"]) == 1
+    assert messages[2]["tool_calls"][0]["id"] == "Bash_1_abc123"
+
+    assert messages[3]["role"] == "tool"
+    assert messages[3]["tool_call_id"] == "Bash_1_abc123"
+
+    assert messages[4]["role"] == "assistant"
+    assert messages[4]["content"] == "I have completed the task."
+    assert "tool_calls" not in messages[4]
+
+    problems = mod.verify(events, messages)
+    assert len(problems) == 0
+
+
 def test_kimi_convert_end_to_end(tmp_path):
     """Test convert.py full pipeline from final_results.json to trials.json and message files."""
     mod = import_agent_module("kimi_cli", "convert")
@@ -222,16 +306,21 @@ def test_kimi_batch_options():
     """Verify argument parsing in batch_run_docker.py."""
     mod = import_agent_module("kimi_cli", "batch_run_docker")
     parser = mod.get_options()
-    args = parser.parse_args(["--model", "moonshot-v1-auto", "--num_instances", "5", "--strategy", "generic"])
-    assert args.model == "moonshot-v1-auto"
+    args = parser.parse_args(["--model", "kimi-k2.7-code", "--num_instances", "5", "--strategy", "generic"])
+    assert args.model == "kimi-k2.7-code"
     assert args.num_instances == 5
     assert args.strategy == "generic"
+
+    # Default model must now be kimi-k2.7-code (not the retired kimi-k2-turbo-preview).
+    defaults = parser.parse_args([])
+    assert defaults.model == "kimi-k2.7-code"
 
 
 def test_kimi_parallel_batch_options():
     """Verify argument parsing in parallel_batch_run.py."""
     mod = import_agent_module("kimi_cli", "parallel_batch_run")
     parser = mod.get_options()
-    args = parser.parse_args(["--num_processes", "8", "--model", "kimi-k2-turbo-preview"])
+    args = parser.parse_args(["--num_processes", "8", "--model", "kimi-k2.7-code"])
     assert args.num_processes == 8
-    assert args.model == "kimi-k2-turbo-preview"
+    assert args.model == "kimi-k2.7-code"
+    assert parser.parse_args([]).model == "kimi-k2.7-code"

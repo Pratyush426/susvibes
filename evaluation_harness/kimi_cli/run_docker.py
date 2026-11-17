@@ -53,9 +53,16 @@ def main():
     DOCKER_IMAGE = instance["image_name"]
 
     env = {}
-    env["KIMI_MODEL"] = os.environ.get("KIMI_MODEL", "kimi-k2-turbo-preview")
-    env["MOONSHOT_API_KEY"] = os.environ.get("MOONSHOT_API_KEY", os.environ.get("KIMI_API_KEY", ""))
-    env["KIMI_API_KEY"] = env["MOONSHOT_API_KEY"]
+    # Kimi Code CLI reads KIMI_MODEL_NAME + KIMI_MODEL_API_KEY.
+    env["KIMI_MODEL_NAME"] = os.environ.get("KIMI_MODEL_NAME", "kimi-k2.7-code")
+    env["KIMI_MODEL_API_KEY"] = os.environ.get(
+        "KIMI_MODEL_API_KEY",
+        os.environ.get("MOONSHOT_API_KEY", os.environ.get("KIMI_API_KEY", "")),
+    )
+    base_url = os.environ.get("KIMI_MODEL_BASE_URL", "")
+    if base_url:
+        env["KIMI_MODEL_BASE_URL"] = base_url
+    env["KIMI_CODE_TRUST_WORKSPACE"] = "1"
 
     print(f"🔧 Environment: {env}")
 
@@ -73,8 +80,9 @@ def main():
         print(f"🔧 Allowed Tools: {' '.join(ALLOWED_TOOLS)}")
         print(f"🔧 Task: {TASK}")
         kimi_command = (
-            "kimi --output-format stream-json "
-            f"-p {escaped_instruction} --yolo"
+            f"kimi -p {escaped_instruction} "
+            f"--output-format stream-json "
+            f"-m {env['KIMI_MODEL_NAME']}"
         )
         print(f"🔧 Command: {kimi_command}")
 

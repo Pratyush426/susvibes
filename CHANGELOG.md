@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Kimi Code CLI harness — migration from deprecated Python kimi-cli
+
+The original Python `kimi-cli` package was archived by Moonshot AI in September 2024
+and replaced with [Kimi Code CLI](https://code.kimi.com), a native binary.
+The harness is updated to work with the new CLI:
+
+- **`setup-env.sh`**: switched from `uv`/`pip install kimi-cli` to the official
+  one-liner `curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash`; no
+  Python or Node runtime required inside the container.
+- **Command line**: removed `--yolo` (incompatible with `-p`); model now passed
+  with `-m` flag: `kimi -p <prompt> --output-format stream-json -m <model>`.
+- **Environment variables**: switched from `MOONSHOT_API_KEY`/`KIMI_API_KEY`/
+  `KIMI_MODEL` (old package) to `KIMI_MODEL_NAME` + `KIMI_MODEL_API_KEY` +
+  `KIMI_MODEL_BASE_URL` (optional) + `KIMI_CODE_TRUST_WORKSPACE=1` (suppresses
+  first-run trust prompt in containers); fallback chain preserves backward
+  compatibility with existing `.env` files.
+- **Default model**: updated from the retired `kimi-k2-turbo-preview` (404 on
+  Moonshot API) to `kimi-k2.7-code`.
+- **`convert.py`**: added Format 1 branch in `events_to_messages()` to handle the
+  real Kimi Code CLI `role`-keyed stream (`role:"meta"` skipped, `role:"assistant"`
+  with `tool_calls` normalised to OpenAI shape, `role:"tool"` with `tool_call_id`).
+  Existing Format 2 (legacy flat events) and Format 3 (OpenAI delta) preserved.
+- **`susvibes/core/constants.py`**: moved `import platform` to top-of-file imports;
+  renamed `_calc_mem_limit` → `calc_mem_limit` (dropped leading underscore).
+- **Tests**: added `test_kimi_convert_kimi_code_cli_native_format` covering the
+  new stream format; updated batch options tests to assert `kimi-k2.7-code` default.
+- **Docs**: updated `kimi_cli/README.md`, `kimi_cli_tutorial.md`, and `.env.sample`
+  to reflect the new CLI, correct env var names, and available models.
+- **Sample output**: added `kimi_cli/examples/final_results.json` showing the
+  expected structure of a Kimi Code CLI run.
+
 ### Phase A — Agent harness interface & prompt infrastructure
 
 - **Shared harness Protocol + data types.** `AgentHarness` / `DockerHarness` Protocols,

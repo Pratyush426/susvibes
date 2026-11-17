@@ -1,4 +1,5 @@
 import os
+import platform
 from enum import StrEnum
 from pathlib import Path
 
@@ -31,9 +32,8 @@ def get_dataset_path(name: str, run_id: str = "default") -> Path:
     }
     return paths[name]
 
-import platform
 
-def _calc_mem_limit() -> str:
+def calc_mem_limit() -> str:
     if hasattr(os, "sysconf"):
         try:
             return "{}g".format(
@@ -47,7 +47,7 @@ class ContainerLimits:
     # A repository whose own suite needs longer than this per run cannot be validated at all, so the
     # timeout is raisable for such a run (`SV_RUN_TIMEOUT=7200`) without moving it for everything.
     RUN_TIMEOUT = int(os.environ.get("SV_RUN_TIMEOUT", 1800))  # seconds
-    MEM_LIMIT = _calc_mem_limit()
+    MEM_LIMIT = calc_mem_limit()
     CPU_LIMIT = min(16, max(1, int((os.cpu_count() or 4) * 0.75)))
 
 # Connections the shared docker client keeps to the daemon. The SDK's default of 10 caps how many

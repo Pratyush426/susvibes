@@ -49,7 +49,7 @@ def get_options():
     parser.add_argument('--start_idx', type=int, default=0, help='Start index of the instances to process')
     parser.add_argument('--num_instances', type=int, default=2, help='Number of instances to process')
     parser.add_argument('--load_from_file', type=str, default=None, help='Path to the file to load from')
-    parser.add_argument('--model', type=str, default="kimi-k2-turbo-preview", help='Model to use')
+    parser.add_argument('--model', type=str, default="kimi-k2.7-code", help='Model to use')
     parser.add_argument('--setup_script', type=str, default="setup-env.sh", help='Setup script to run in container')
     parser.add_argument('--timestamp_suffix', type=str, default=None, help='Suffix to append to timestamp for unique directory names (for parallel runs)')
     parser.add_argument('--keep_workspace', action='store_true', default=False, help='Whether to keep the workspace after cleanup')
@@ -133,9 +133,20 @@ async def process_instance(
         logger.info(f"Starting Docker integration for {instance_id}")
 
         env = {}
-        env["KIMI_MODEL"] = os.environ.get("KIMI_MODEL", model)
-        env["MOONSHOT_API_KEY"] = os.environ.get("MOONSHOT_API_KEY", os.environ.get("KIMI_API_KEY", ""))
-        env["KIMI_API_KEY"] = env["MOONSHOT_API_KEY"]
+        # Kimi Code CLI reads KIMI_MODEL_NAME + KIMI_MODEL_API_KEY (the old
+        # MOONSHOT_API_KEY / KIMI_API_KEY / KIMI_MODEL env vars are ignored by
+        # the native binary).  Pass a fallback chain so existing .env files that
+        # still export the legacy names continue to work.
+        env["KIMI_MODEL_NAME"] = os.environ.get("KIMI_MODEL_NAME", model)
+        env["KIMI_MODEL_API_KEY"] = os.environ.get(
+            "KIMI_MODEL_API_KEY",
+            os.environ.get("MOONSHOT_API_KEY", os.environ.get("KIMI_API_KEY", "")),
+        )
+        base_url = os.environ.get("KIMI_MODEL_BASE_URL", "")
+        if base_url:
+            env["KIMI_MODEL_BASE_URL"] = base_url
+        # Suppress the interactive first-run trust prompt inside the container.
+        env["KIMI_CODE_TRUST_WORKSPACE"] = "1"
 
         if strategy != "none":
             problem_statement = apply_safety_hint(problem_statement)
@@ -152,9 +163,16 @@ async def process_instance(
                 logger.warning(f"Environment setup failed for {instance_id}: {setup_result.get('stderr', '')}")
 
             logger.info(f"Running Kimi CLI for {instance_id}")
+            # Kimi Code CLI (the native binary that replaced the deprecated Python
+            # kimi-cli package):
+            #   • -p <prompt> carries the task; --yolo must NOT be combined with -p
+            #     (error: "Cannot combine --prompt with --yolo")
+            #   • non-interactive mode already runs tools without approval prompts
+            #   • the model is selected with -m (--model is not read from env)
             kimi_command = (
-                "kimi --output-format stream-json "
-                f"-p {escaped_instruction} --yolo"
+                f"kimi -p {escaped_instruction} "
+                f"--output-format stream-json "
+                f"-m {env['KIMI_MODEL_NAME']}"
             )
 
             result = integration.execute_in_container(kimi_command, env=env)
@@ -171,7 +189,7 @@ async def process_instance(
 
             result_dict = {
                 "instance_id": instance_id,
-                "model_name_or_path": model,
+                "model_name_or_path": env["KIMI_MODEL_NAME"],
                 "model_patch": diff_text,
                 "workspace": str(workspace),
                 "kimi_stdout": result.get("stdout", ""),

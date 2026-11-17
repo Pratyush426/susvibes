@@ -70,26 +70,111 @@ def _text(value: Any) -> str:
 def events_to_messages(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Reconstruct OpenAI messages from kimi-cli's events.
 
-    Supports both flat event streams (type: message / tool_use / tool_result)
-    and OpenAI-compatible delta streams (choices[0].delta).
+    Handles three stream formats:
+
+    1. **Kimi Code CLI** (native binary, ``--output-format stream-json``):
+       One JSON object per line keyed by ``role``.  Lines with
+       ``role: "meta"`` are skipped.  Assistant lines carry ``tool_calls``
+       and tool lines carry ``tool_call_id`` + ``content``.
+
+       .. code-block:: json
+
+           {"role":"meta","type":"system.version","version":"2.5.2"}
+           {"role":"assistant","tool_calls":[{"type":"function","id":"…","function":{…}}]}
+           {"role":"tool","tool_call_id":"…","content":"…"}
+
+    2. **Legacy flat event stream** (old Python kimi-cli):
+       Lines with ``type: message / tool_use / tool_result``.
+
+    3. **OpenAI-compatible delta stream**:
+       Lines with a ``choices`` list (OpenAI streaming SSE format).
     """
     messages: List[Dict[str, Any]] = []
-    seen_call_ids = set()
+    seen_call_ids: set = set()
 
     for ev in events:
+        role = ev.get("role")
         etype = ev.get("type")
 
-        # 1. Flat message events
-        if etype == "message":
-            role = ev.get("role") or "user"
-            if role not in ("user", "assistant", "system"):
-                role = "user"
-            text = _text(ev.get("content"))
+        # ------------------------------------------------------------------ #
+        # 1. Kimi Code CLI native format: role-keyed lines
+        # ------------------------------------------------------------------ #
+        if role == "meta":
+            # Informational only (version, session info, …) — skip.
+            continue
+
+        if role == "assistant":
+            # May have plain text content and/or tool_calls.
+            content_text = _text(ev.get("content", ""))
+            tool_calls_raw = ev.get("tool_calls") or []
+
+            if tool_calls_raw:
+                # Normalise each tool call into the OpenAI shape.
+                tool_calls = []
+                for tc in tool_calls_raw:
+                    tc_id = str(tc.get("id", f"call_{len(seen_call_ids)}"))
+                    seen_call_ids.add(tc_id)
+                    fn = tc.get("function", {})
+                    args = fn.get("arguments", "{}")
+                    if isinstance(args, (dict, list)):
+                        args = json.dumps(args, ensure_ascii=False)
+                    tool_calls.append({
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {
+                            "name": fn.get("name", "unknown_tool"),
+                            "arguments": args,
+                        },
+                    })
+                # Merge into the last assistant message when possible.
+                last = messages[-1] if messages else None
+                if last is not None and last.get("role") == "assistant":
+                    last.setdefault("tool_calls", []).extend(tool_calls)
+                    if content_text:
+                        last["content"] = (last.get("content") or "") + content_text
+                else:
+                    messages.append({
+                        "role": "assistant",
+                        "content": content_text,
+                        "tool_calls": tool_calls,
+                    })
+            elif content_text:
+                last = messages[-1] if messages else None
+                if last is not None and last.get("role") == "assistant" and "tool_calls" not in last:
+                    last["content"] += content_text
+                else:
+                    messages.append({"role": "assistant", "content": content_text})
+            continue
+
+        if role == "tool":
+            # Kimi Code CLI tool-result line.
+            tool_id = str(ev.get("tool_call_id", ""))
+            text = _text(ev.get("content", ""))
+            messages.append({"role": "tool", "tool_call_id": tool_id, "content": text})
+            continue
+
+        if role in ("user", "system"):
+            text = _text(ev.get("content", ""))
             last = messages[-1] if messages else None
             if last is not None and last.get("role") == role and "tool_calls" not in last:
                 last["content"] += text
             else:
                 messages.append({"role": role, "content": text})
+            continue
+
+        # ------------------------------------------------------------------ #
+        # 2. Legacy flat event stream (old Python kimi-cli)
+        # ------------------------------------------------------------------ #
+        if etype == "message":
+            msg_role = ev.get("role") or "user"
+            if msg_role not in ("user", "assistant", "system"):
+                msg_role = "user"
+            text = _text(ev.get("content"))
+            last = messages[-1] if messages else None
+            if last is not None and last.get("role") == msg_role and "tool_calls" not in last:
+                last["content"] += text
+            else:
+                messages.append({"role": msg_role, "content": text})
 
         elif etype == "tool_use":
             tool_id = str(ev.get("tool_id", f"call_{len(seen_call_ids)}"))
@@ -117,22 +202,22 @@ def events_to_messages(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             else:
                 messages.append({"role": "user", "content": text})
 
-        # 2. OpenAI / Delta streaming events
+        # ------------------------------------------------------------------ #
+        # 3. OpenAI-compatible delta streaming events
+        # ------------------------------------------------------------------ #
         elif "choices" in ev and isinstance(ev["choices"], list) and ev["choices"]:
             choice = ev["choices"][0]
             delta = choice.get("delta") or choice.get("message") or {}
-            role = delta.get("role") or "assistant"
+            delta_role = delta.get("role") or "assistant"
 
-            # Content delta
             content_delta = delta.get("content")
             if content_delta:
                 last = messages[-1] if messages else None
-                if last is not None and last.get("role") == role and "tool_calls" not in last:
+                if last is not None and last.get("role") == delta_role and "tool_calls" not in last:
                     last["content"] += content_delta
                 else:
-                    messages.append({"role": role, "content": content_delta})
+                    messages.append({"role": delta_role, "content": content_delta})
 
-            # Tool call deltas
             for tc in delta.get("tool_calls", []):
                 tc_id = tc.get("id")
                 fn = tc.get("function", {})
@@ -160,20 +245,11 @@ def events_to_messages(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     tool_call = {
                         "id": tc_id or f"call_{len(seen_call_ids)}",
                         "type": "function",
-                        "function": {
-                            "name": fn_name,
-                            "arguments": fn_args,
-                        },
+                        "function": {"name": fn_name, "arguments": fn_args},
                     }
                     if tool_call["id"]:
                         seen_call_ids.add(tool_call["id"])
                     last["tool_calls"].append(tool_call)
-
-        # 3. Direct tool message events
-        elif ev.get("role") == "tool":
-            tool_id = str(ev.get("tool_call_id", ""))
-            text = _text(ev.get("content", ""))
-            messages.append({"role": "tool", "tool_call_id": tool_id, "content": text})
 
     return messages
 
@@ -182,8 +258,12 @@ def events_to_messages(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # run metadata & model extraction
 # --------------------------------------------------------------------------- #
 
-def extract_model(events: List[Dict[str, Any]], fallback: str = "kimi-k2-turbo-preview") -> str:
-    """Extract model identifier from stream events if available."""
+def extract_model(events: List[Dict[str, Any]], fallback: str = "kimi-k2.7-code") -> str:
+    """Extract model identifier from stream events if available.
+
+    Kimi Code CLI emits a ``{"role":"meta","type":"system.version",…}`` line
+    but does not embed the model name in the stream; fall back to the default.
+    """
     for ev in events:
         if ev.get("type") in ("init", "system") and ev.get("model"):
             return str(ev["model"])
